@@ -1,0 +1,1198 @@
+diff --git a/src/main/scala/rocket/CSR.scala b/src/main/scala/rocket/CSR.scala
+index 591e054..a1a46ee 100644
+--- a/src/main/scala/rocket/CSR.scala
++++ b/src/main/scala/rocket/CSR.scala
+@@ -217,6 +217,9 @@ class CSRFile(perfEventSets: EventSets = new EventSets(Seq()))(implicit p: Param
+   val reset_mstatus = Wire(init=new MStatus().fromBits(0))
+   reset_mstatus.mpp := PRV.M
+   reset_mstatus.prv := PRV.M
++  /* PHMon: begin */
++  reset_mstatus.sum := Bool(true)
++  /* PHMon: end */
+   val reg_mstatus = Reg(init=reset_mstatus)
+ 
+   val new_prv = Wire(init = reg_mstatus.prv)
+@@ -417,7 +420,9 @@ class CSRFile(perfEventSets: EventSets = new EventSets(Seq()))(implicit p: Param
+     read_sstatus.uxl := io.status.uxl
+     read_sstatus.sd_rv32 := io.status.sd_rv32
+     read_sstatus.mxr := io.status.mxr
+-    read_sstatus.sum := io.status.sum
++    /* PHMon: begin */
++    read_sstatus.sum := Bool(true)
++    /* PHMon: end */
+     read_sstatus.xs := io.status.xs
+     read_sstatus.fs := io.status.fs
+     read_sstatus.spp := io.status.spp
+@@ -624,7 +629,9 @@ class CSRFile(perfEventSets: EventSets = new EventSets(Seq()))(implicit p: Param
+         reg_mstatus.mpp := trimPrivilege(new_mstatus.mpp)
+         if (usingVM) {
+           reg_mstatus.mxr := new_mstatus.mxr
+-          reg_mstatus.sum := new_mstatus.sum
++          /* PHMon: begin */
++          reg_mstatus.sum := Bool(true)
++          /* PHMon: end */
+           reg_mstatus.spp := new_mstatus.spp
+           reg_mstatus.spie := new_mstatus.spie
+           reg_mstatus.sie := new_mstatus.sie
+@@ -699,7 +706,9 @@ class CSRFile(perfEventSets: EventSets = new EventSets(Seq()))(implicit p: Param
+         reg_mstatus.spie := new_sstatus.spie
+         reg_mstatus.spp := new_sstatus.spp
+         reg_mstatus.mxr := new_sstatus.mxr
+-        reg_mstatus.sum := new_sstatus.sum
++        /* PHMon: begin */
++        reg_mstatus.sum := Bool(true)
++        /* PHMon: end */
+         reg_mstatus.fs := Fill(2, new_sstatus.fs.orR) // even without an FPU
+         if (usingRoCC) reg_mstatus.xs := Fill(2, new_sstatus.xs.orR)
+       }
+diff --git a/src/main/scala/rocket/DCache.scala b/src/main/scala/rocket/DCache.scala
+index b48b0ea..9a1ba8b 100644
+--- a/src/main/scala/rocket/DCache.scala
++++ b/src/main/scala/rocket/DCache.scala
+@@ -168,6 +168,30 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
+   when (!tlb.io.req.ready && !tlb.io.ptw.resp.valid && !io.cpu.req.bits.phys) { io.cpu.req.ready := false }
+   when (s1_valid && s1_readwrite && tlb.io.resp.miss) { s1_nack := true }
+ 
++  /* PHMon: begin */
++  tlb.io.pkru_rd_req.bits.idx := io.cpu.pkru_req.bits.pd_addr(9,5)
++  tlb.io.pkru_rd_req.bits.key := io.cpu.pkru_req.bits.pd_addr(4,0)
++  tlb.io.pkru_rd_req.valid := io.cpu.pkru_req.valid && !io.cpu.pkru_req.bits.wr
++
++  tlb.io.pkru_wr_req.bits.idx := io.cpu.pkru_req.bits.pd_addr(9,5)
++  tlb.io.pkru_wr_req.bits.key := 1.U << io.cpu.pkru_req.bits.pd_addr(4,0)
++  //tlb.io.pkru_wr_req.bits.key := (1.U << 32) - 1.U  //0x1f (write all)
++  tlb.io.pkru_wr_req.bits.value := io.cpu.pkru_req.bits.value
++  tlb.io.pkru_wr_req.valid := io.cpu.pkru_req.valid && io.cpu.pkru_req.bits.wr
++
++  when (io.cpu.pkru_req.valid) {
++    printf("[PKRU] **** Cache: pkru req *** type 0x%x\n", io.cpu.pkru_req.valid)
++  }
++
++  when (io.cpu.pkru_req.valid && !io.cpu.pkru_req.bits.wr) {
++    printf("[PKRU] **** Cache: read *** addr: 0x%x element: 0x%x\n", tlb.io.pkru_rd_req.bits.idx, tlb.io.pkru_rd_req.bits.key)
++  }
++
++  when (io.cpu.pkru_req.valid && io.cpu.pkru_req.bits.wr) {
++    printf("[PKRU] **** Cache: write *** addr: 0x%x mask: 0x%x value: 0x%x\n", tlb.io.pkru_wr_req.bits.idx, tlb.io.pkru_wr_req.bits.key, tlb.io.pkru_wr_req.bits.value)
++  }
++  /* PHMon: end */
++
+   val s1_paddr = tlb.io.resp.paddr
+   val s1_victim_way = Wire(init = replacer.way)
+   val (s1_hit_way, s1_hit_state, s1_meta, s1_victim_meta) =
+@@ -752,6 +776,11 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
+     }
+   }
+ 
++  /* PHMon: begin */
++  io.cpu.pkru_resp.bits.resp := tlb.io.pkru_resp.bits
++  io.cpu.pkru_resp.valid := tlb.io.pkru_resp.valid
++  /* PHMon: end */
++
+   // performance events
+   io.cpu.perf.acquire := edge.done(tl_out_a)
+   io.cpu.perf.release := edge.done(tl_out_c)
+diff --git a/src/main/scala/rocket/Frontend.scala b/src/main/scala/rocket/Frontend.scala
+index 8a0fce7..bb132f7 100644
+--- a/src/main/scala/rocket/Frontend.scala
++++ b/src/main/scala/rocket/Frontend.scala
+@@ -36,6 +36,9 @@ class FrontendResp(implicit p: Parameters) extends CoreBundle()(p) {
+   val mask = Bits(width = fetchWidth)
+   val xcpt = new FrontendExceptions
+   val replay = Bool()
++  /* PHMon: begin */
++  //val pd = UInt(width = 10) // The protection domain
++  /* PHMon: end */
+ }
+ 
+ class FrontendPerfEvents extends Bundle {
+@@ -149,6 +152,9 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
+   fq.io.enq.bits.btb := s2_btb_resp_bits
+   fq.io.enq.bits.btb.taken := s2_btb_taken
+   fq.io.enq.bits.xcpt := s2_tlb_resp
++  /* PHMon: begin */
++  //fq.io.enq.bits.pd := s2_tlb_resp.pd
++  /* PHMon: end */
+   when (icache.io.resp.valid && icache.io.resp.bits.ae) { fq.io.enq.bits.xcpt.ae.inst := true }
+ 
+   if (usingBTB) {
+diff --git a/src/main/scala/rocket/HellaCache.scala b/src/main/scala/rocket/HellaCache.scala
+index fd83763..f71886d 100644
+--- a/src/main/scala/rocket/HellaCache.scala
++++ b/src/main/scala/rocket/HellaCache.scala
+@@ -103,6 +103,9 @@ trait HasCoreData extends HasCoreParameters {
+ 
+ class HellaCacheReqInternal(implicit p: Parameters) extends CoreBundle()(p) with HasCoreMemOp {
+   val phys = Bool()
++  /* PHMon: begin */
++  val valid_req = Bool()
++  /* PHMon: end */
+ }
+ 
+ class HellaCacheReq(implicit p: Parameters) extends HellaCacheReqInternal()(p) with HasCoreData
+@@ -115,6 +118,9 @@ class HellaCacheResp(implicit p: Parameters) extends CoreBundle()(p)
+   val data_word_bypass = Bits(width = coreDataBits)
+   val data_raw = Bits(width = coreDataBits)
+   val store_data = Bits(width = coreDataBits)
++  /* PHMon: begin */
++  val s2_xcpt_else = Bool()
++  /* PHMon: end */
+ }
+ 
+ class AlignmentExceptions extends Bundle {
+@@ -139,6 +145,18 @@ class HellaCachePerfEvents extends Bundle {
+   val tlbMiss = Bool()
+ }
+ 
++/* PHMon: begin */
++class PKRUReq (implicit p: Parameters) extends PKRUBundle()(p) {
++  val wr = Bool()
++  val pd_addr = UInt(10.W)
++  val value = UInt(width = pkruWidth)
++}
++
++class PKRUResp (implicit p: Parameters) extends PKRUBundle()(p) {
++  val resp = UInt(64.W)
++}
++/* PHMon: ebd */
++
+ // interface between D$ and processor/DTLB
+ class HellaCacheIO(implicit p: Parameters) extends CoreBundle()(p) {
+   val req = Decoupled(new HellaCacheReq)
+@@ -152,6 +170,11 @@ class HellaCacheIO(implicit p: Parameters) extends CoreBundle()(p) {
+   val invalidate_lr = Bool(OUTPUT)
+   val ordered = Bool(INPUT)
+   val perf = new HellaCachePerfEvents().asInput
++  /* PHMon: begin */
++  val pkru_req = Decoupled(new PKRUReq)
++  val pkru_resp = Valid(new PKRUResp).flip
++  val assertion = Bool(INPUT)
++   /* PHMon: end */
+ }
+ 
+ /** Base classes for Diplomatic TL2 HellaCaches */
+diff --git a/src/main/scala/rocket/HellaCacheArbiter.scala b/src/main/scala/rocket/HellaCacheArbiter.scala
+index ec3acef..713cf8f 100644
+--- a/src/main/scala/rocket/HellaCacheArbiter.scala
++++ b/src/main/scala/rocket/HellaCacheArbiter.scala
+@@ -59,6 +59,12 @@ class HellaCacheArbiter(n: Int)(implicit p: Parameters) extends Module
+       io.requestor(i).s2_nack := io.mem.s2_nack && s2_id === UInt(i)
+       resp.bits := io.mem.resp.bits
+       resp.bits.tag := io.mem.resp.bits.tag >> log2Up(n)
++      /* PHMon: begin */
++      io.mem.pkru_req <> io.requestor(i).pkru_req
++      io.requestor(i).pkru_resp <> io.mem.pkru_resp
++
++      resp.bits.s2_xcpt_else := (io.mem.s2_xcpt.ae.st || io.mem.s2_xcpt.ae.ld) && s2_id =/= UInt(1)
++      /* PHMon: end */
+ 
+       io.requestor(i).replay_next := io.mem.replay_next
+     }
+diff --git a/src/main/scala/rocket/IBuf.scala b/src/main/scala/rocket/IBuf.scala
+index da7d180..b578983 100644
+--- a/src/main/scala/rocket/IBuf.scala
++++ b/src/main/scala/rocket/IBuf.scala
+@@ -25,6 +25,9 @@ class IBuf(implicit p: Parameters) extends CoreModule {
+     val pc = UInt(OUTPUT, vaddrBitsExtended)
+     val btb_resp = new BTBResp().asOutput
+     val inst = Vec(retireWidth, Decoupled(new Instruction))
++    /* PHMon: begin */
++    val pd = UInt(OUTPUT, width = 10)
++    /* PHMon: end */
+   }
+ 
+   // This module is meant to be more general, but it's not there yet
+@@ -80,6 +83,9 @@ class IBuf(implicit p: Parameters) extends CoreModule {
+ 
+   io.btb_resp := io.imem.bits.btb
+   io.pc := Mux(nBufValid > 0, buf.pc, io.imem.bits.pc)
++  /* PHMon: begin */
++  //io.pd := Mux(nBufValid > 0, buf.pd, io.imem.bits.pd)
++  /* PHMon: end */
+   expand(0, 0, inst)
+ 
+   def expand(i: Int, j: UInt, curInst: UInt): Unit = if (i < retireWidth) {
+diff --git a/src/main/scala/rocket/NBDcache.scala b/src/main/scala/rocket/NBDcache.scala
+index 7487daa..b888547 100644
+--- a/src/main/scala/rocket/NBDcache.scala
++++ b/src/main/scala/rocket/NBDcache.scala
+@@ -713,7 +713,30 @@ class NonBlockingDCacheModule(outer: NonBlockingDCache) extends HellaCacheModule
+   dtlb.io.req.bits.size := s1_req.typ
+   dtlb.io.req.bits.cmd := s1_req.cmd
+   when (!dtlb.io.req.ready && !io.cpu.req.bits.phys) { io.cpu.req.ready := Bool(false) }
+-  
++
++  /* PHMon: begin */
++  /*dtlb.io.pkru_rd_req.bits.idx := io.cpu.pkru_req.bits.pd_addr(3,0)
++  dtlb.io.pkru_rd_req.bits.key := io.cpu.pkru_req.bits.pd_addr(9,4)
++  dtlb.io.pkru_rd_req.valid := io.cpu.pkru_req.valid && !io.cpu.pkru_req.bits.wr
++
++  dtlb.io.pkru_wr_req.bits.idx := 1.U << io.cpu.pkru_req.bits.pd_addr(3,0)
++  dtlb.io.pkru_wr_req.bits.key := io.cpu.pkru_req.bits.pd_addr(9,4)
++  dtlb.io.pkru_wr_req.bits.value := io.cpu.pkru_req.bits.value
++  dtlb.io.pkru_wr_req.valid := io.cpu.pkru_req.valid && io.cpu.pkru_req.bits.wr
++
++  when (io.cpu.pkru_req.valid) {
++    printf("[PKRU] **** NBDCache: pkru req *** type 0x%x\n", io.cpu.pkru_req.bits.wr)
++  }
++
++  when (io.cpu.pkru_req.valid && !io.cpu.pkru_req.bits.wr) {
++    printf("[PKRU] **** NBDCache: read *** idx: 0x%x key: 0x%x\n", dtlb.io.pkru_rd_req.bits.idx, dtlb.io.pkru_rd_req.bits.key)
++  }
++
++  when (io.cpu.pkru_req.valid && io.cpu.pkru_req.bits.wr) {
++    printf("[PKRU] **** NBDCache: write *** idx: 0x%x key: 0x%x value: 0x%x\n", dtlb.io.pkru_wr_req.bits.idx, dtlb.io.pkru_wr_req.bits.key, dtlb.io.pkru_wr_req.bits.value.perm)
++  }*/
++  /* PHMon: end */
++
+   when (io.cpu.req.valid) {
+     s1_req := io.cpu.req.bits
+   }
+@@ -977,6 +1000,11 @@ class NonBlockingDCacheModule(outer: NonBlockingDCache) extends HellaCacheModule
+   io.cpu.ordered := mshrs.io.fence_rdy && !s1_valid && !s2_valid
+   io.cpu.replay_next := (s1_replay && s1_read) || mshrs.io.replay_next
+ 
++  /* PHMon: begin */
++  //io.cpu.pkru_resp.bits.resp := dtlb.io.pkru_resp.bits.perm
++  //io.cpu.pkru_resp.valid := dtlb.io.pkru_resp.valid
++  /* PHMon: end */
++
+   val s1_xcpt_valid = dtlb.io.req.valid && !s1_nack
+   val s1_xcpt = dtlb.io.resp
+   io.cpu.s2_xcpt := Mux(RegNext(s1_xcpt_valid), RegEnable(s1_xcpt, s1_clk_en), 0.U.asTypeOf(s1_xcpt))
+diff --git a/src/main/scala/rocket/PTW.scala b/src/main/scala/rocket/PTW.scala
+index 1e7b811..9e2420d 100644
+--- a/src/main/scala/rocket/PTW.scala
++++ b/src/main/scala/rocket/PTW.scala
+@@ -48,7 +48,11 @@ class DatapathPTWIO(implicit p: Parameters) extends CoreBundle()(p)
+ }
+ 
+ class PTE(implicit p: Parameters) extends CoreBundle()(p) {
+-  val ppn = UInt(width = 54)
++  /* PHMon: begin */
++  //val ppn = UInt(width = 54)
++  val pd = UInt(width = 10)
++  val ppn = UInt(width = 44)
++  /* PHMon: end */
+   val reserved_for_software = Bits(width = 2)
+   val d = Bool()
+   val a = Bool()
+@@ -58,6 +62,10 @@ class PTE(implicit p: Parameters) extends CoreBundle()(p) {
+   val w = Bool()
+   val r = Bool()
+   val v = Bool()
++  /* PHMon: begin */
++  //val pd = Bool()
++  //val pd = UInt(width = 10) // 10 reserved bits as the protection domain
++  /* PHMon: end */
+ 
+   def table(dummy: Int = 0) = v && !r && !w && !x
+   def leaf(dummy: Int = 0) = v && (r || (x && !w)) && a
+@@ -139,6 +147,11 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
+     (hit && count < pgLevels-1, Mux1H(hits, data))
+   }
+ 
++  /* PHMon: begin */
++  when (io.mem.resp.valid && traverse) {
++    printf("[PTW] resp_data: 0x%x pte_addr: 0x%x ppn: 0x%x\n", io.mem.resp.bits.data, pte_addr, pte.ppn)
++  }
++  /* PHMon: end */
+   val l2_refill = RegNext(false.B)
+   io.dpath.perf.l2miss := false
+   val (l2_hit, l2_valid, l2_pte, l2_tlb_ram) = if (coreParams.nL2TLBEntries == 0) (false.B, false.B, Wire(new PTE), None) else {
+@@ -150,6 +163,9 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
+     class Entry extends Bundle {
+       val tag = UInt(width = tagBits)
+       val ppn = UInt(width = ppnBits)
++      /* PHMon: begin */
++      val pd = UInt(width = 10)
++      /* PHMon: end */
+       val d = Bool()
+       val a = Bool()
+       val u = Bool()
+@@ -196,6 +212,10 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
+     s2_pte := s2_entry
+     s2_pte.g := s2_g
+     s2_pte.v := true
++    /* PHMon: begin */
++    // Default pd value for now, needs to be determined later
++    //s2_pte.pd := 0x010
++    /* PHMon: end */
+ 
+     ccover(s2_hit, "L2_TLB_HIT", "L2 TLB hit")
+ 
+@@ -221,11 +241,20 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
+     io.requestor(i).resp.bits.ae := resp_ae
+     io.requestor(i).resp.bits.pte := r_pte
+     io.requestor(i).resp.bits.level := count
++    /* PHMon: begin */
+     io.requestor(i).resp.bits.pte.ppn := pte_addr >> pgIdxBits
++    //io.requestor(i).resp.bits.pte.pd := 0x0
++    /* PHMon: end */
+     io.requestor(i).resp.bits.homogeneous := pmpHomogeneous && pmaHomogeneous
+     io.requestor(i).ptbr := io.dpath.ptbr
+     io.requestor(i).status := io.dpath.status
+     io.requestor(i).pmp := io.dpath.pmp
++
++    /* PHMon: begin */
++    when (io.requestor(i).resp.valid) {
++      printf("[PTW] requestor(%d) =====> resp_ppn: 0x%x pgidxbits: %d\n", i, pte_addr >> pgIdxBits, pgIdxBits)
++    }
++    /* PHMon: end */
+   }
+ 
+   // control state machine
+@@ -241,6 +270,9 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
+         s1_kill := true
+         count := count + 1
+         r_pte.ppn := pte_cache_data
++        /* PHMon: begin */
++        printf("[PTW] resp_data: 0x%x pte_addr: 0x%x ppn: 0x%x pte_cache_data: 0x%x count: %d ppn_width: %d\n", io.mem.resp.bits.data, pte_addr, pte.ppn, pte_cache_data, count, ppnBits)
++        /* PHMon: end */
+       }.elsewhen (io.mem.req.fire()) {
+         state := s_wait1
+       }
+diff --git a/src/main/scala/rocket/RocketCore.scala b/src/main/scala/rocket/RocketCore.scala
+index 460e25f..98ce439 100644
+--- a/src/main/scala/rocket/RocketCore.scala
++++ b/src/main/scala/rocket/RocketCore.scala
+@@ -13,6 +13,75 @@ import freechips.rocketchip.util.property._
+ import scala.collection.immutable.ListMap
+ import scala.collection.mutable.ArrayBuffer
+ 
++/* PHMon: begin */
++import chisel3.PrintableHelper
++/*trait HasFilterInstrParameters {
++  val numFilters = 4
++}
++
++class FilterInstr(implicit val p: Parameters)
++    extends ParameterizedBundle()(p) with HasCoreParameters {
++  val instr = UInt(width = 32)
++  val mask = UInt(width = 32)
++}
++
++class InstrDomainEntry(implicit val p: Parameters)
++    extends ParameterizedBundle()(p) with HasFilterInstrParameters {
++  val v = Vec(numFilters, Bool())
++  //val v = Vec.fill(numFilters)(Bool(false))
++}*/
++/* PHMon: end */
++
++/* PHMon: begin */
++class SealReqWR extends Bundle {
++  val pkey = UInt(width=10)
++  val addr_start = UInt(width = 38)
++  val addr_end = UInt(width = 38)
++}
++
++class SealReqRD extends Bundle {
++  val pkey = UInt(width=10)
++  val addr = UInt(width = 38)
++}
++
++class SealResp extends Bundle() {
++  val hit_match = Bool()
++}
++
++class CAMEntry extends Bundle() {
++  val pkey = UInt(10)
++  val addr_start = UInt(38)
++  val addr_end = UInt(38)
++}
++
++class SealCAM(entries: Int, pkey_bits: Int, addr_bits: Int) extends Module {
++  val io = new Bundle {
++    val req_wr = Valid(new SealReqWR()).flip
++    val req_rd = Valid(new SealReqRD()).flip
++    val hit = new SealResp().asOutput
++  }
++  val counter = Reg(UInt(4.W))
++  val cam_pkeys = Mem(entries, Bits(86.W))
++  when (io.req_wr.valid) {
++    cam_pkeys(counter) := Cat(io.req_wr.bits.pkey, io.req_wr.bits.addr_start, io.req_wr.bits.addr_end)
++    counter := counter + UInt(1)
++  }
++  val hitsVec = (0 until entries).map(i => ((cam_pkeys(i)(85,76) === io.req_rd.bits.pkey) && (io.req_rd.bits.addr >= cam_pkeys(i)(75,38)) && (io.req_rd.bits.addr <= cam_pkeys(i)(37,0))))
++  val hits = hitsVec.asUInt
++  io.hit.hit_match := hits(entries-1, 0).orR && io.req_rd.valid
++
++  when (io.req_wr.valid) {
++    printf("[PKRU] **** CAM *** pkey 0x%x addr_start 0x%x addr_end: 0x%x\n", io.req_wr.bits.pkey, io.req_wr.bits.addr_start, io.req_wr.bits.addr_end)
++  }
++
++  when (io.req_rd.valid) {
++    printf("[PKRU] **** CAM *** pkey 0x%x addr 0x%x counter: %d is_hit? %d\n", io.req_rd.bits.pkey, io.req_rd.bits.addr, counter, io.hit.hit_match)
++    printf("[PKRU] **** CAM *** counter: %d pkeys: 0x%x addr_start: 0x%x addr_end: 0x%x hits_vec(counter): %d %d\n", counter - UInt(1), cam_pkeys(counter - UInt(1))(85,76), cam_pkeys(counter - UInt(1))(75,38), cam_pkeys(counter - UInt(1))(37,0), hitsVec(counter - UInt(1)), hits(counter - UInt(1))) 
++    printf(p"[PKRU] hitsVec: $hitsVec hits: $hits\n")
++  }
++}
++/* PHMon: end */
++
+ case class RocketCoreParams(
+   bootFreqHz: BigInt = 0,
+   useVM: Boolean = true,
+@@ -171,6 +240,34 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+   val take_pc_mem_wb = take_pc_wb || take_pc_mem
+   val take_pc = take_pc_mem_wb
+ 
++  /* PHMon: begin */
++  val intr_dec = Reg(Bool())
++  val intr_ex = Reg(Bool())
++  val intr_mem = Reg(Bool())
++  val intr_wb = Reg(Bool())
++  val intr_replay = Reg(Bool())
++  val rocc_rd = Reg(UInt(width = 5))
++  val wrpkru_sealed = Wire(Bool())
++  val wrpkru_sealed_pkey = Reg(UInt(width=10))
++  val rocc_resp_start_valid = Wire(Bool())
++  val rocc_resp_end_valid = Wire(Bool())
++  val rocc_resp_rd = Reg(UInt(width = 5))
++
++  //val seal_pkru = Mem(16, UInt(64.W))
++  //val seal_pkru = Reg(Vec(1024, Bool()))
++  val seal_pkru = RegInit(Vec(Seq.fill(1024)(Bool(false))))
++  val seal_addr_start = Reg(UInt(width = 64))
++  val seal_addr_end = Reg(UInt(width = 64))
++
++  val seal_cam = Module(new SealCAM(16, 10, 38))
++
++  // Add the instruction filtering capability
++  /*val nEntries = 16
++  val instr_filter = Reg(new FilterInstr)
++  val (e_SF_INST :: e_SF_INST_MASK :: Nil) = Enum(UInt(), 2)
++  val reg_entries = Reg(Vec(nEntries, new InstrDomainEntry()))*/
++  /* PHMon: end */
++
+   // decode stage
+   val ibuf = Module(new IBuf)
+   val id_expanded_inst = ibuf.io.inst.map(_.bits.inst)
+@@ -307,6 +404,31 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+   ex_reg_replay := !take_pc && ibuf.io.inst(0).valid && ibuf.io.inst(0).bits.replay
+   ex_reg_xcpt := !ctrl_killd && id_xcpt
+   ex_reg_xcpt_interrupt := !take_pc && ibuf.io.inst(0).valid && csr.io.interrupt
++  /* PHMon: begin */
++  intr_dec := csr.io.interrupt && io.rocc.interrupt
++  //intr_dec := csr.io.interrupt && (io.rocc.interrupt | wrpkru_sealed)
++  intr_ex := ex_reg_xcpt_interrupt && intr_dec
++
++  // Set the filter instruction match and mask bits
++  /*val ex_rocc_instr = new RoCCInstruction().fromBits(ex_reg_inst)
++  val set_filter = ex_ctrl.rocc && ex_reg_valid && !ex_reg_replay && (ex_rocc_instr.funct === UInt(18))
++  val filter_data = ex_rs(0)
++  val filter_action = ex_rs(1)
++  when (set_filter) {
++    switch(filter_action) {
++      is (e_SF_INST) { instr_filter.instr := filter_data }
++      is (e_SF_INST_MASK) { instr_filter.mask := filter_data }
++    }
++  }
++
++  // Check if the instruction should be filtered
++  def isMatch(en: Bool, x: FilterInstr, instr: UInt): Bool = {
++    en && (~(x.instr.toBits ^ instr.toBits) | x.mask.toBits).andR }
++
++
++  val isFiltered = isMatch(ex_reg_valid && !ex_reg_replay, instr_filter, ex_reg_inst)
++   */
++  /* PHMon: end */
+ 
+   when (!ctrl_killd) {
+     ex_ctrl := id_ctrl
+@@ -398,7 +520,11 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+   mem_reg_valid := !ctrl_killx
+   mem_reg_replay := !take_pc_mem_wb && replay_ex
+   mem_reg_xcpt := !ctrl_killx && ex_xcpt
++  /* PHMon: begin */
+   mem_reg_xcpt_interrupt := !take_pc_mem_wb && ex_reg_xcpt_interrupt
++  //mem_reg_xcpt_interrupt := (!take_pc_mem_wb && ex_reg_xcpt_interrupt) | wrpkru_sealed
++  intr_mem := mem_reg_xcpt_interrupt && intr_ex
++  /* PGMon: end */
+ 
+   // on pipeline flushes, cause mem_npc to hold the sequential npc, which
+   // will drive the W-stage npc mux
+@@ -474,6 +600,11 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+     wb_reg_raw_inst := mem_reg_raw_inst
+     wb_reg_pc := mem_reg_pc
+   }
++  /* PHMon: begin */
++  intr_wb := wb_reg_xcpt && intr_mem
++  intr_replay := (intr_dec && !ex_reg_xcpt_interrupt) || (intr_ex && !mem_reg_xcpt_interrupt) || (intr_mem && !wb_reg_xcpt)
++  val custom_inst_wb = new RoCCInstruction().fromBits(wb_reg_inst)
++  /* PHMon: end */
+ 
+   val (wb_xcpt, wb_cause) = checkExceptions(List(
+     (wb_reg_xcpt,  wb_reg_cause),
+@@ -513,6 +644,12 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+   val ll_wdata = Wire(init = div.io.resp.bits.data)
+   val ll_waddr = Wire(init = div.io.resp.bits.tag)
+   val ll_wen = Wire(init = div.io.resp.fire())
++  /* PHMon: begin */
++  val pkru_wait_resp = Reg(init = Bool(false))
++  val rocc_start_wait_resp = Reg(init = Bool(false))
++  val rocc_end_wait_resp = Reg(init = Bool(false))
++  val pkru_resp = Reg(init = io.dmem.pkru_resp.bits.resp)
++  /* PHMon: end */
+   if (usingRoCC) {
+     io.rocc.resp.ready := !wb_wxd
+     when (io.rocc.resp.fire()) {
+@@ -521,6 +658,56 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+       ll_waddr := io.rocc.resp.bits.rd
+       ll_wen := Bool(true)
+     }
++    /* PHMon: begin */
++    /*when ((rocc_resp_start_valid || rocc_start_wait_resp) && !wb_wxd) {
++      div.io.resp.ready := Bool(false)
++      ll_wdata := Cat(0.U(29),seal_addr_start(37,0))
++      ll_waddr := Mux(rocc_start_wait_resp, custom_inst_wb.rd, rocc_resp_rd)
++      ll_wen   := Bool(true)
++      rocc_start_wait_resp := Bool(false)
++      printf("[PKRU] **** Rocket *** read seal start addr waddr: 0x%x wdata: 0x%x\n", io.rocc.cmd.bits.inst.rd, seal_addr_start)
++    }
++
++    when ((rocc_resp_end_valid || rocc_end_wait_resp) && !wb_wxd) {
++      div.io.resp.ready := Bool(false)
++      ll_wdata := Cat(0.U(29),seal_addr_end(37,0))
++      ll_waddr := Mux(rocc_end_wait_resp, custom_inst_wb.rd, rocc_resp_rd)
++      ll_wen   := Bool(true)
++      rocc_end_wait_resp := Bool(false)
++      printf("[PKRU] **** Rocket *** read seal end addr waddr: 0x%x wdata: 0x%x\n", io.rocc.cmd.bits.inst.rd, seal_addr_end)
++    }
++
++    when (rocc_resp_start_valid && wb_wxd) {
++      rocc_resp_rd := custom_inst_wb.rd
++      rocc_start_wait_resp := Bool(true)
++    }
++
++    when (rocc_resp_end_valid && wb_wxd) {
++      rocc_resp_rd := custom_inst_wb.rd
++      rocc_end_wait_resp := Bool(true)
++    }*/
++
++    /*when (wb_valid && io.rocc.cmd.bits.inst.funct === UInt(22) && !wb_wxd) {
++      div.io.resp.ready := Bool(false)
++      ll_wdata := seal_addr_end
++      ll_waddr := io.rocc.cmd.bits.inst.rd
++      ll_wen   := Bool(true)
++      printf("[PKRU] **** Rocket *** read seal end addr waddr: 0x%x wdata: 0x%x\n", io.rocc.cmd.bits.inst.rd, seal_addr_end)
++    }*/
++
++    when ((io.dmem.pkru_resp.valid || pkru_wait_resp) && !wb_wxd) {
++      div.io.resp.ready := Bool(false)
++      ll_wdata := Mux(pkru_wait_resp, pkru_resp, io.dmem.pkru_resp.bits.resp)
++      ll_waddr := rocc_rd
++      ll_wen   := Bool(true)
++      pkru_wait_resp := Bool(false)
++      printf("[PKRU] **** Rocket *** pkru_resp_valid? %d pkru_wait_resp? %d waddr: 0x%x wdata: 0x%x\n", io.dmem.pkru_resp.valid, pkru_wait_resp, rocc_rd, ll_wdata)
++    }
++    when (io.dmem.pkru_resp.valid && wb_wxd) {
++      pkru_resp := io.dmem.pkru_resp.bits.resp
++      pkru_wait_resp := Bool(true)
++    }
++    /* PHMon: end */
+   }
+   when (dmem_resp_replay && dmem_resp_xpu) {
+     div.io.resp.ready := Bool(false)
+@@ -547,11 +734,23 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+   csr.io.cause := wb_cause
+   csr.io.retire := wb_valid
+   csr.io.inst(0) := (if (usingCompressed) Cat(Mux(wb_reg_raw_inst(1, 0).andR, wb_reg_inst >> 16, 0.U), wb_reg_raw_inst(15, 0)) else wb_reg_inst)
++  /* PHMon: begin */
++  //csr.io.interrupts := io.interrupts
+   csr.io.interrupts := io.interrupts
++  /* PHMon: end */
+   csr.io.hartid := io.hartid
+   io.fpu.fcsr_rm := csr.io.fcsr_rm
+   csr.io.fcsr_flags := io.fpu.fcsr_flags
++  /* PHMon: begin */
+   csr.io.rocc_interrupt := io.rocc.interrupt
++  //csr.io.rocc_interrupt := io.rocc.interrupt | wrpkru_sealed
++  when (csr.io.rocc_interrupt) {
++    printf("[PKRU] rocc interrupt\n") 
++  }
++  when (csr.io.interrupt && csr.io.rocc_interrupt) {
++    printf("[PKRU] CSR interrupt\n") 
++  }
++  /* PHMon: end */
+   csr.io.pc := wb_reg_pc
+   val tval_valid = wb_xcpt && wb_cause.isOneOf(Causes.illegal_instruction, Causes.breakpoint,
+     Causes.misaligned_load, Causes.misaligned_store,
+@@ -688,12 +887,106 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
+   io.dmem.s1_kill := killm_common || mem_ldst_xcpt
+ 
+   io.rocc.cmd.valid := wb_reg_valid && wb_ctrl.rocc && !replay_wb_common
+-  io.rocc.exception := wb_xcpt && csr.io.status.xs.orR
++  /* PHMon: begin */
++  val custom_rs1 = mem_reg_wdata
++  val custom_rs2 = mem_reg_rs2
++
++  io.rocc.exception := (wb_xcpt || RegNext(wb_reg_xcpt)) && csr.io.status.xs.orR
++  /* PHMon: end */
+   io.rocc.cmd.bits.status := csr.io.status
+   io.rocc.cmd.bits.inst := new RoCCInstruction().fromBits(wb_reg_inst)
+   io.rocc.cmd.bits.rs1 := wb_reg_wdata
+   io.rocc.cmd.bits.rs2 := wb_reg_rs2
+ 
++  /* PHMon: begin */
++  val custom_inst = new RoCCInstruction().fromBits(mem_reg_inst)
++  //val custom_inst_wb = new RoCCInstruction().fromBits(wb_reg_inst)
++  //io.dmem.pkru_req.valid :=  wb_ctrl.rocc && !replay_wb_common && (custom_inst.funct === UInt(16) || custom_inst.funct === UInt(17))
++
++  seal_cam.io.req_rd.valid :=  mem_ctrl.rocc && mem_reg_valid && !replay_mem  && (custom_inst.funct === UInt(16)) && seal_pkru(mem_int_wdata(9,0))
++  seal_cam.io.req_rd.bits.pkey := mem_int_wdata(9,0)
++  seal_cam.io.req_rd.bits.addr := mem_reg_pc
++
++  when (seal_cam.io.req_rd.valid) {
++    wrpkru_sealed_pkey := mem_int_wdata(9,0)
++  }
++
++  io.dmem.pkru_req.valid :=  mem_ctrl.rocc && mem_reg_valid && !replay_mem  && ((custom_inst.funct === UInt(16) && (~seal_pkru(mem_int_wdata(9,0)) || (seal_pkru(mem_int_wdata(9,0)) && seal_cam.io.hit.hit_match))) || custom_inst.funct === UInt(17))
++
++  wrpkru_sealed := mem_ctrl.rocc && mem_reg_valid && !replay_mem && (custom_inst.funct === UInt(16)) && seal_pkru(mem_int_wdata(9,0)) && !seal_cam.io.hit.hit_match
++
++  when (wrpkru_sealed) {
++    printf("[PKRU] **** Sealed interrupt **** \n")
++  }
++
++  when (io.dmem.pkru_req.valid) {
++    printf("[PKRU] **** Rocket: pkru req *** type 0x%x\n", io.dmem.pkru_req.bits.wr)
++    // write_pkru
++    when (custom_inst.funct === UInt(16)) {
++      printf("[PKRU] **** Rocket: mem *** funct: 0x%x rs1: 0x%x rs2: 0x%x rd (addr): 0x%x pd_addr: 0x%x perm: 0x%x\n", custom_inst.funct, mem_int_wdata, mem_reg_rs2, custom_inst.rd, mem_int_wdata(9,0), mem_reg_rs2)
++      io.dmem.pkru_req.bits.wr         := Bool(true)
++      io.dmem.pkru_req.bits.pd_addr    := mem_int_wdata(9,0)
++      io.dmem.pkru_req.bits.value      := mem_reg_rs2
++      rocc_rd                          := custom_inst.rd
++    }
++    // read_pkru
++    when (custom_inst.funct === UInt(17)) {
++      printf("[PKRU] **** Rocket: mem *** funct: 0x%x rs1: 0x%x rs2: 0x%x rd (addr): 0x%x pd_addr: 0x%x\n", custom_inst.funct, mem_int_wdata, custom_rs2, custom_inst.rd, mem_reg_wdata(9,0))
++      io.dmem.pkru_req.bits.wr      := Bool(false)
++      io.dmem.pkru_req.bits.pd_addr := mem_reg_wdata(9,0)
++      rocc_rd                       := custom_inst.rd
++    }
++  }
++
++  val seal_cmd_valid = mem_ctrl.rocc && mem_reg_valid && !replay_mem  && (custom_inst.funct === UInt(18) || custom_inst.funct === UInt(19) || custom_inst.funct === UInt(20))
++
++  seal_cam.io.req_wr.valid := false.B
++  when (seal_cmd_valid) {
++    printf("[PKRU] **** Rocket: seal req *** type 0x%x\n", custom_inst.funct)
++    // seal_addr_start: (pkey, addr)
++    when (custom_inst.funct === UInt(18)) {
++      printf("[PKRU] **** Rocket: seal START *** funct: 0x%x pkey: 0x%x addr: 0x%x, start: 0x%x\n", custom_inst.funct, mem_int_wdata, mem_reg_pc, Cat(mem_int_wdata(9,0), mem_reg_pc))
++      seal_addr_start := Cat(mem_int_wdata(9,0), mem_reg_pc)
++    }
++
++    // seal_addr_end: (pkey, addr)
++    when (custom_inst.funct === UInt(19)) {
++      printf("[PKRU] **** Rocket: seal END *** funct: 0x%x pkey: 0x%x addr: 0x%x, end: 0x%x\n", custom_inst.funct, mem_int_wdata, mem_reg_pc, Cat(mem_int_wdata(9,0), mem_reg_pc))
++      seal_addr_end := Cat(mem_int_wdata(9,0), mem_reg_pc)
++    }
++
++    // Seal the pkey
++    when (custom_inst.funct === UInt(20) && ~(seal_pkru(mem_int_wdata(9,0)))) {
++      printf("[PKRU] **** Rocket: SEAL Command *** index: 0x%x \n", mem_int_wdata(9,0))
++      seal_pkru(mem_int_wdata(9,0)) := true.B
++      seal_cam.io.req_wr.bits.pkey := mem_int_wdata(9, 0)
++      seal_cam.io.req_wr.bits.addr_start := seal_addr_start
++      seal_cam.io.req_wr.bits.addr_end := seal_addr_end
++      seal_cam.io.req_wr.valid := true.B
++    }
++
++  }
++
++  io.rocc.commitLog.valid := wb_valid
++  io.rocc.commitLog.bits.pc_src := wb_reg_pc
++  io.rocc.commitLog.bits.pc_dst := RegNext(mem_npc)
++  io.rocc.commitLog.bits.inst := wb_reg_inst
++  io.rocc.commitLog.bits.addr := io.dmem.req.bits.addr
++  //io.rocc.commitLog.bits.data := rf_wdata
++  io.rocc.commitLog.bits.data := Mux(custom_inst_wb.funct === UInt(21), Mux(wb_reg_wdata === UInt(1), Cat(0.U(29),seal_addr_start(37,0)), Mux(wb_reg_wdata === UInt(2), Cat(0.U(29),seal_addr_end(37,0)), wrpkru_sealed_pkey)), UInt(0))
++  io.rocc.commitLog.bits.is_compressed := RegNext(RegNext(RegNext(ibuf.io.inst(0).bits.rvc)))
++  io.rocc.commitLog.bits.priv := csr.io.status.prv
++  //io.rocc.commitLog.bits.interrupt_replay := intr_replay
++  io.rocc.commitLog.bits.interrupt_replay := intr_replay | wrpkru_sealed
++
++  rocc_resp_start_valid := wb_reg_valid && wb_ctrl.rocc && !replay_wb_common && (custom_inst_wb.funct === UInt(21))
++  rocc_resp_end_valid := wb_reg_valid && wb_ctrl.rocc && !replay_wb_common && (custom_inst_wb.funct === UInt(22))
++  //rocc_resp_valid := wb_reg_valid && wb_ctrl.rocc && !replay_wb_common && (io.rocc.cmd.bits.inst.funct === UInt(21) || io.rocc.cmd.bits.inst.funct === UInt(22))
++  when (rocc_resp_start_valid || rocc_resp_end_valid) {
++    printf("[PKRU] Custom instr to read seal addresses; type: %d \n", io.rocc.cmd.bits.inst.funct)
++  }
++  /* PHMon: end */
++
+   // evaluate performance counters
+   val icache_blocked = !(io.imem.resp.valid || RegNext(io.imem.resp.valid))
+   csr.io.counters foreach { c => c.inc := RegNext(perfEvents.evaluate(c.eventSel)) }
+diff --git a/src/main/scala/rocket/SimpleHellaCacheIF.scala b/src/main/scala/rocket/SimpleHellaCacheIF.scala
+index 1ee13e6..ef80e2b 100644
+--- a/src/main/scala/rocket/SimpleHellaCacheIF.scala
++++ b/src/main/scala/rocket/SimpleHellaCacheIF.scala
+@@ -126,11 +126,15 @@ class SimpleHellaCacheIF(implicit p: Parameters) extends Module
+   io.cache.s1_kill := io.cache.s2_nack
+   io.cache.s1_data.data := RegEnable(req_arb.io.out.bits.data, s0_req_fire)
+ 
+-  replayq.io.nack.valid := (io.cache.s2_nack || s2_kill) && s2_req_fire
++  /* PHMon: begin */
++  replayq.io.nack.valid := ((io.cache.s2_nack || s2_kill) && s2_req_fire) || (io.requestor.req.bits.valid_req)
++  /* PHMon: end */
+   replayq.io.nack.bits := s2_req_tag
+   replayq.io.resp := io.cache.resp
+   io.requestor.resp := io.cache.resp
+ 
+-  assert(!RegNext(RegNext(io.cache.req.fire())) || !io.cache.s2_xcpt.asUInt.orR,
+-         "SimpleHellaCacheIF exception")
++  /* PHMon: begin */
++  io.requestor.assertion := RegNext(RegNext(io.cache.req.fire())) && io.cache.s2_xcpt.asUInt.orR && !io.cache.resp.bits.s2_xcpt_else
++  io.requestor.s2_xcpt := io.cache.s2_xcpt
++  /* PHMon: end */
+ }
+diff --git a/src/main/scala/rocket/TLB.scala b/src/main/scala/rocket/TLB.scala
+index 5eca04e..a899da5 100644
+--- a/src/main/scala/rocket/TLB.scala
++++ b/src/main/scala/rocket/TLB.scala
+@@ -18,6 +18,219 @@ import chisel3.internal.sourceinfo.SourceInfo
+ case object PgLevels extends Field[Int](2)
+ case object ASIdBits extends Field[Int](0)
+ 
++/* PHMon: begin */
++import chisel3.PrintableHelper
++
++class PKRUPerm  (implicit p: Parameters) extends CoreBundle()(p) {
++  val perm = UInt(width = 2)
++  
++  def rw_perm(dummy: Int = 0)  = (perm === UInt(0))
++  def r_perm(dummy: Int = 0)   = (perm === UInt(1))
++  def w_perm(dummy: Int = 0)   = (perm === UInt(2))
++  def no_perm(dummy: Int = 0)  = (perm === UInt(3))
++  //def no_perm(dummy: Int = 0) = ((perm === UInt(3)) || (perm === UInt(2)) )
++}
++
++trait HasPKRUParameters {
++  val idxBits = 5
++  val keyBits = 32
++  val pkruWidth = 64
++}
++
++abstract class PKRUModule(implicit val p: Parameters) extends Module
++  with HasPKRUParameters
++
++abstract class PKRUBundle(implicit val p: Parameters) extends ParameterizedBundle()(p)
++  with HasPKRUParameters
++
++class PKRUReadReq (implicit p: Parameters) extends PKRUBundle()(p) {
++  val idx = UInt(width = idxBits)
++  val key = UInt(width = log2Ceil(keyBits))
++}
++
++class PKRUWriteReq (implicit p: Parameters) extends PKRUBundle()(p) {
++  val idx   = UInt(width = idxBits)
++  val key   = UInt(width = keyBits)
++  val value = UInt(width = pkruWidth)
++  //val value = UInt(width = 2)
++}
++
++//class PKRU (nbits: Int)(implicit p: Parameters) extends PKRUModule()(p) {
++/*class PKRU(implicit p: Parameters) extends PKRUModule()(p) {
++  val io = new Bundle {
++    val readReq = Decoupled(new PKRUReadReq).flip
++    val writeReq = Decoupled(new PKRUWriteReq).flip
++    val resp = Reg(UInt(2.W)).asOutput
++    //val resp_all = Reg(UInt(64.W)).asOutput
++  }
++  val pkru     = SeqMem(32, Vec(32, UInt(2.W)))
++
++  val wen      = io.writeReq.valid
++  val wdata    = Vec.fill(32)(io.writeReq.bits.value)
++  //val wdata    = Wire(Vec(32, UInt(2.W)))
++  val waddr    = io.writeReq.bits.idx
++  val wmask    = io.writeReq.bits.key.asSInt.toBools
++
++  val rkey     = io.readReq.bits.key
++  val ren      = io.readReq.valid
++  val raddr    = io.readReq.bits.idx
++
++  io.readReq.ready := !wen
++  io.writeReq.ready := true
++
++  val rst_waddr = 0.U
++  val rst_wdata = Vec.fill(32)(0.U(2.W))
++  val rst_wmask = Vec.fill(32)(Bool(false))
++  rst_wmask(0) := Bool(true)
++
++  when (reset.toBool) {
++    pkru.write(rst_waddr, rst_wdata, rst_wmask)
++  }
++
++  when (wen) {
++    /*for (i <- 0 until 32) {
++      wdata(i) := io.writeReq.bits.value((i * nbits) + 1, i * nbits)
++    }*/
++    pkru.write(waddr, wdata, wmask)
++    printf(p"[PKRU] inside write ---- waddr: $waddr  wdata: $wdata  wmask: $wmask \n")
++  }
++
++  //val rdata = pkru.read(raddr, ren && !wen)
++  val rdata = pkru.read(raddr, ren)
++  io.resp := rdata(rkey)
++
++  when (ren) {
++    printf(p"[PKRU] inside read ---- raddr: $raddr  rdata: $rdata rkey: $rkey rdata(rkey): $rdata(rkey)\n")
++  }
++  //io.resp_all :=  (rdata.reverse.reduce(Cat(_,_)))
++ }*/
++
++
++class PKRU (implicit p: Parameters) extends PKRUModule()(p) {
++  val io = new Bundle {
++    val readReq = Decoupled(new PKRUReadReq).flip
++    val writeReq = Decoupled(new PKRUWriteReq).flip
++    val resp = Reg(UInt(2.W)).asOutput
++    val resp_all = Reg(UInt(64.W)).asOutput
++  }
++  val pkru     = Mem(32, UInt(64.W))
++
++  io.readReq.ready := !io.writeReq.valid
++  io.writeReq.ready := true
++
++  when (io.writeReq.valid) {
++    pkru(io.writeReq.bits.idx) := io.writeReq.bits.value
++    printf(p"[PKRU] inside write ---- waddr: $io.writeReq.bits.idx  wdata: $io.weiteReq.bits.value \n")
++  }
++
++  io.resp_all := Mux(io.readReq.valid, pkru(io.readReq.bits.idx), 0.U)
++  when (io.readReq.valid) {
++    //printf(p"[PKRU] inside read ---- raddr: $io.readReq.bits.idx  rdata: $io.resp_all\n")
++  }
++  
++  switch (io.readReq.bits.key) {
++    is (0.U) {
++      io.resp := pkru(io.readReq.bits.idx)(1,0)
++    }
++    is (1.U) {
++      io.resp := pkru(io.readReq.bits.idx)(3,2)
++    }
++    is (2.U) {
++      io.resp := pkru(io.readReq.bits.idx)(5,4)
++    }
++    is (3.U) {
++      io.resp := pkru(io.readReq.bits.idx)(7,6)
++    }
++    is (4.U) {
++      io.resp := pkru(io.readReq.bits.idx)(9,8)
++    }
++    is (5.U) {
++      io.resp := pkru(io.readReq.bits.idx)(11,10)
++    }
++    is (6.U) {
++      io.resp := pkru(io.readReq.bits.idx)(13,12)
++    }
++    is (7.U) {
++      io.resp := pkru(io.readReq.bits.idx)(15,14)
++    }
++    is (8.U) {
++      io.resp := pkru(io.readReq.bits.idx)(17,16)
++    }
++    is (9.U) {
++      io.resp := pkru(io.readReq.bits.idx)(19,18)
++    }
++    is (10.U) {
++      io.resp := pkru(io.readReq.bits.idx)(21,20)
++    }
++    is (11.U) {
++      io.resp := pkru(io.readReq.bits.idx)(23,22)
++    }
++    is (12.U) {
++      io.resp := pkru(io.readReq.bits.idx)(25,24)
++    }
++    is (13.U) {
++      io.resp := pkru(io.readReq.bits.idx)(27,26)
++    }
++    is (14.U) {
++      io.resp := pkru(io.readReq.bits.idx)(29,28)
++    }
++    is (15.U) {
++      io.resp := pkru(io.readReq.bits.idx)(31,30)
++    }
++    is (16.U) {
++      io.resp := pkru(io.readReq.bits.idx)(33,32)
++    }
++    is (17.U) {
++      io.resp := pkru(io.readReq.bits.idx)(35,34)
++    }
++    is (18.U) {
++      io.resp := pkru(io.readReq.bits.idx)(37,36)
++    }
++    is (19.U) {
++      io.resp := pkru(io.readReq.bits.idx)(39,38)
++    }
++    is (20.U) {
++      io.resp := pkru(io.readReq.bits.idx)(41,40)
++    }
++    is (21.U) {
++      io.resp := pkru(io.readReq.bits.idx)(43,42)
++    }
++    is (22.U) {
++      io.resp := pkru(io.readReq.bits.idx)(45,44)
++    }
++    is (23.U) {
++      io.resp := pkru(io.readReq.bits.idx)(47,46)
++    }
++    is (24.U) {
++      io.resp := pkru(io.readReq.bits.idx)(49,48)
++    }
++    is (25.U) {
++      io.resp := pkru(io.readReq.bits.idx)(51,50)
++    }
++    is (26.U) {
++      io.resp := pkru(io.readReq.bits.idx)(53,52)
++    }
++    is (27.U) {
++      io.resp := pkru(io.readReq.bits.idx)(55,54)
++    }
++    is (28.U) {
++      io.resp := pkru(io.readReq.bits.idx)(57,56)
++    }
++    is (29.U) {
++      io.resp := pkru(io.readReq.bits.idx)(59,58)
++    }
++    is (30.U) {
++      io.resp := pkru(io.readReq.bits.idx)(61,60)
++    }
++    is (31.U) {
++      io.resp := pkru(io.readReq.bits.idx)(63,62)
++    }
++  }
++  //io.resp := 3.U(2.W)
++ }
++
++/* PHMon: end */
++
+ class SFenceReq(implicit p: Parameters) extends CoreBundle()(p) {
+   val rs1 = Bool()
+   val rs2 = Bool()
+@@ -50,6 +263,9 @@ class TLBResp(implicit p: Parameters) extends CoreBundle()(p) {
+   val ma = new TLBExceptions
+   val cacheable = Bool()
+   val prefetchable = Bool()
++  /* PHMon: begin */
++  val pd = UInt(width = 10)
++  /* PHMon: end */
+ }
+ 
+ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(p) {
+@@ -57,6 +273,12 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+     val req = Decoupled(new TLBReq(lgMaxSize)).flip
+     val resp = new TLBResp().asOutput
+     val ptw = new TLBPTWIO
++    /* PHMon: begin */
++    val pkru_rd_req = Decoupled(new PKRUReadReq).flip
++    val pkru_wr_req = Decoupled(new PKRUWriteReq).flip
++    //val pkru_resp = Valid(UInt(width=xLen)).asOutput
++    val pkru_resp = Valid(UInt(width = 64)).asOutput
++    /* PHMon: end */
+   }
+ 
+   class Entry extends Bundle {
+@@ -76,8 +298,19 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+     val paa = Bool() // AMO arithmetic
+     val eff = Bool() // get/put effects
+     val c = Bool()
++    /* PHMon: begin */
++    val pd = UInt(width = 10)
++    /* PHMon: end */
+   }
+ 
++  /* PHMon: begin */
++  //val pkru_prot = Module(new PKRU(2))
++  val pkru_prot = Module(new PKRU)
++  val pd_bits = Wire(new PKRUPerm())
++  val pd_valid = Wire(Bool())
++  pkru_prot.io.writeReq.valid := Bool(false)
++  pkru_prot.io.readReq.valid  := Bool(false)
++  /* PHMon: end */
+   val totalEntries = nEntries + 1
+   val normalEntries = nEntries
+   val specialEntry = nEntries
+@@ -141,6 +374,11 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+     ppn
+   }
+ 
++  /* PHMon: begin */
++  val pd_accessed = Mux1H(hitsVec.init, entries.map(_.pd))
++  pd_valid := Bool(false)
++  /* PHMon: end */
++
+   // permission bit arrays
+   when (do_refill && !invalidate_refill) {
+     val waddr = Mux(io.ptw.resp.bits.ae, aeEntry.U, Mux(!io.ptw.resp.bits.homogeneous, specialEntry.U, r_refill_waddr))
+@@ -162,6 +400,10 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+     newEntry.pal := prot_al
+     newEntry.paa := prot_aa
+     newEntry.eff := prot_eff
++    /* PHMon: begin */
++    newEntry.pd := pte.pd
++    //printf("[TLB] ppn: 0x%x pd: 0x%x ppn_bits: %d vpn_bits: %d\n", pte.ppn, pte.pd, ppnBits, vpnBits)
++    /* PHMon: end */
+ 
+     valid := valid | UIntToOH(waddr)
+     reg_entries(waddr) := newEntry.asUInt
+@@ -207,10 +449,66 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+ 
+   val tlb_hit = hits(totalEntries-1, 0).orR
+   val tlb_miss = vm_enabled && !bad_va && !tlb_hit && !io.req.bits.sfence.valid
++  /* PHMon: begin */
++  //val valid_access = io.req.valid && !tlb_miss && !hits(specialEntry)
++  val valid_access = io.req.valid && !tlb_miss
++  /* PHMon: end */
+   when (io.req.valid && !tlb_miss && !hits(specialEntry)) {
+     plru.access(OHToUInt(hits(normalEntries-1, 0)))
+   }
+ 
++  /* PHMon: begin */
++  //io.pkru_resp.valid := Bool(false)
++  when (io.pkru_rd_req.valid) {
++    pkru_prot.io.readReq.valid := Bool(true)
++    pkru_prot.io.readReq.bits.idx := io.pkru_rd_req.bits.idx
++    pkru_prot.io.readReq.bits.key := io.pkru_rd_req.bits.key
++    //io.pkru_resp.valid := Bool(true)
++    //io.pkru_resp.bits := pkru_prot.io.resp
++    printf("[PKRU] **** TLB: read *** idx: 0x%x key: 0x%x\n", io.pkru_rd_req.bits.idx, io.pkru_rd_req.bits.key)
++  }
++  //io.pkru_resp.bits := pkru_prot.io.resp
++  io.pkru_resp.bits := pkru_prot.io.resp_all
++  io.pkru_resp.valid := io.pkru_rd_req.valid
++
++  when (io.pkru_resp.valid) {
++    printf("[PKRU] **** TLB: read_resp *** resp: 0x%x perm: 0x%x\n", io.pkru_resp.bits, pkru_prot.io.resp)
++  }
++
++  when (io.pkru_wr_req.valid) {
++    pkru_prot.io.writeReq.valid := Bool(true)
++    pkru_prot.io.writeReq.bits.idx := io.pkru_wr_req.bits.idx
++    pkru_prot.io.writeReq.bits.key := io.pkru_wr_req.bits.key
++    pkru_prot.io.writeReq.bits.value := io.pkru_wr_req.bits.value
++    printf("[PKRU] **** TLB: write *** idx: 0x%x key: 0x%x value: 0x%x\n", io.pkru_wr_req.bits.idx, io.pkru_wr_req.bits.key, io.pkru_wr_req.bits.value)
++  }
++
++  //pd_bits.perm := 0.U(2.W)
++  when (hits.orR && valid_access && !io.pkru_rd_req.valid) {
++      pkru_prot.io.readReq.valid := Bool(true)
++      pkru_prot.io.readReq.bits.idx := pd_accessed(9,5)
++      pkru_prot.io.readReq.bits.key := pd_accessed(4,0)
++      pd_valid := Bool(true)
++      when (pkru_prot.io.resp =/= UInt(0)) {
++        //printf("[PKRU] **** HIT: read pkru_prot *** idx: 0x%x key: 0x%x resp: 0x%x\n", pd_accessed(9,5), pd_accessed(4,0), pkru_prot.io.resp)
++      }
++      //pd_bits.perm := pkru_prot.io.resp
++  }
++
++  //pd_valid := hits.orR && valid_access && !io.pkru_rd_req.valid //FIX
++  //pd_valid := hits.orR && valid_access
++  pd_bits.perm := pkru_prot.io.resp
++  //pd_bits.perm := Mux(pd_valid, pkru_prot.io.resp, 0.U(2.W))
++  when (pd_valid && pd_bits.perm =/= 3.U(2.W)) {
++    printf("[ACC] HIT --- pd_bits.perm: 0x%x\n", pd_bits.perm)
++  }
++  /* PHMon: end */
++
++  when (pd_accessed =/= 0.U) {
++    printf("[ACC] HIT: pd_accessed: 0x%x hits: 0x%x pd: 0x%x pd_bits: 0x%x\n", pd_accessed, hits, entries(hits).pd, pd_bits.perm)
++  }
++
++
+   // Superpages create the possibility that two entries in the TLB may match.
+   // This corresponds to a software bug, but we can't return complete garbage;
+   // we must return either the old translation or the new translation.  This
+@@ -219,9 +517,25 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+   val multipleHits = PopCountAtLeast(hits(totalEntries-1, 0), 2)
+ 
+   io.req.ready := state === s_ready
+-  io.resp.pf.ld := (bad_va && isRead(io.req.bits.cmd)) || (pf_ld_array & hits).orR
+-  io.resp.pf.st := (bad_va && isWrite(io.req.bits.cmd)) || (pf_st_array & hits).orR
++  /* PHMon: begin */
++  //io.resp.pf.ld := (bad_va && isRead(io.req.bits.cmd)) || (pf_ld_array & hits).orR
++  //io.resp.pf.st := (bad_va && isWrite(io.req.bits.cmd)) || (pf_st_array & hits).orR
++  //io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
++
++  io.resp.pf.ld := (bad_va && isRead(io.req.bits.cmd)) || (pf_ld_array & hits).orR || (pd_valid && isRead(io.req.bits.cmd) && (pd_bits.perm =/= 0.U(2.W) && (pd_bits.perm =/= 1.U(2.W))))
++  io.resp.pf.st := (bad_va && isWrite(io.req.bits.cmd)) || (pf_st_array & hits).orR || (pd_valid && isWrite(io.req.bits.cmd) && (pd_bits.perm =/= 0.U(2.W)))
++
++  //io.resp.pf.st := (bad_va && isWrite(io.req.bits.cmd)) || (pf_st_array & hits).orR || (pd_valid && isWrite(io.req.bits.cmd) && (pd_bits.perm =/= 0.U(2.W) && pd_bits.perm =/= 2.U(2.W)))
+   io.resp.pf.inst := bad_va || (pf_inst_array & hits).orR
++
++  when (io.resp.pf.ld) {
++    printf("[ACC] pd read fault: pd_accessed: 0x%x hits: 0x%x pd: 0x%x pd_bits: 0x%x\n", pd_accessed, hits, entries(hits).pd, pd_bits.perm)
++  }
++
++  when (io.resp.pf.st) {
++    printf("[ACC] pd write fault: pd_accessed: 0x%x hits: 0x%x pd: 0x%x pd_bits: 0x%x\n", pd_accessed, hits, entries(hits).pd, pd_bits.perm)
++  }
++  /* PHMon: end */
+   io.resp.ae.ld := (ae_ld_array & hits).orR
+   io.resp.ae.st := (ae_st_array & hits).orR
+   io.resp.ae.inst := (~px_array & hits).orR
+@@ -232,6 +546,9 @@ class TLB(instruction: Boolean, lgMaxSize: Int, nEntries: Int)(implicit edge: TL
+   io.resp.prefetchable := (prefetchable_array & hits).orR && edge.manager.managers.forall(m => !m.supportsAcquireB || m.supportsHint)
+   io.resp.miss := do_refill || tlb_miss || multipleHits
+   io.resp.paddr := Cat(ppn, io.req.bits.vaddr(pgIdxBits-1, 0))
++  /* PHMon: begin */
++  io.resp.pd := pd_accessed
++  /* PHMon: end */
+ 
+   io.ptw.req.valid := state === s_request
+   io.ptw.req.bits <> io.ptw.status
+diff --git a/src/main/scala/tile/BaseTile.scala b/src/main/scala/tile/BaseTile.scala
+index 4586379..6935f25 100644
+--- a/src/main/scala/tile/BaseTile.scala
++++ b/src/main/scala/tile/BaseTile.scala
+@@ -57,7 +57,10 @@ trait HasTileParameters {
+     }
+   def paddrBits: Int = p(SharedMemoryTLEdge).bundle.addressBits
+   def vpnBits: Int = vaddrBits - pgIdxBits
++  /* PHMon: begin */
+   def ppnBits: Int = paddrBits - pgIdxBits
++  //def ppnBits: Int = paddrBits - pgIdxBits - 10
++  /* PHMon: end */
+   def pgLevels: Int = p(PgLevels)
+   def asIdBits: Int = p(ASIdBits)
+   def vpnBitsExtended: Int = vpnBits + (vaddrBits < xLen).toInt
+diff --git a/src/main/scala/tile/LazyRoCC.scala b/src/main/scala/tile/LazyRoCC.scala
+index 512f736..b56f243 100644
+--- a/src/main/scala/tile/LazyRoCC.scala
++++ b/src/main/scala/tile/LazyRoCC.scala
+@@ -52,6 +52,9 @@ class RoCCCoreIO(implicit p: Parameters) extends CoreBundle()(p) {
+   val busy = Bool(OUTPUT)
+   val interrupt = Bool(OUTPUT)
+   val exception = Bool(INPUT)
++  /* PHMon: begin */
++  val commitLog = Decoupled(new CommitLog).flip
++  /* PHMon: end */
+ }
+ 
+ /** Base classes for Diplomatic TL2 RoCC units **/
+@@ -109,6 +112,9 @@ trait HasLazyRoCCModule[+L <: BaseTile with HasLazyRoCC] extends CanHavePTWModul
+       ptwPorts ++= rocc.module.io.ptw
+       rocc.module.io.cmd <> cmdRouter.io.out(i)
+       rocc.module.io.exception := roccCore.exception
++      /* PHMon: begin */
++      rocc.module.io.commitLog <> roccCore.commitLog
++      /* PHMon: end */
+       val dcIF = Module(new SimpleHellaCacheIF()(outer.p))
+       dcIF.io.requestor <> rocc.module.io.mem
+       dcachePorts += dcIF.io.cache
+diff --git a/src/main/scala/tile/RocketTile.scala b/src/main/scala/tile/RocketTile.scala
+index e4ace50..7ad7140 100644
+--- a/src/main/scala/tile/RocketTile.scala
++++ b/src/main/scala/tile/RocketTile.scala
+@@ -127,6 +127,9 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
+   core.io.rocc.resp <> roccCore.resp
+   core.io.rocc.busy := roccCore.busy
+   core.io.rocc.interrupt := roccCore.interrupt
++  /* PHMon: begin */
++  roccCore.commitLog <> core.io.rocc.commitLog
++  /* PHMon: end */
+ 
+   // Rocket has higher priority to DTIM than other TileLink clients
+   outer.dtim_adapter.foreach { lm => dcachePorts += lm.module.io.dmem }

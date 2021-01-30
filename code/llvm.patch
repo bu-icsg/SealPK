@@ -1,0 +1,277 @@
+diff --git a/llvm/lib/Target/RISCV/CMakeLists.txt b/llvm/lib/Target/RISCV/CMakeLists.txt
+index 07c32cb315d0..955f15ce941e 100644
+--- a/llvm/lib/Target/RISCV/CMakeLists.txt
++++ b/llvm/lib/Target/RISCV/CMakeLists.txt
+@@ -27,6 +27,7 @@ add_llvm_target(RISCVCodeGen
+   RISCVSubtarget.cpp
+   RISCVTargetMachine.cpp
+   RISCVTargetObjectFile.cpp
++  RISCVProt.cpp
+   )
+ 
+ add_subdirectory(AsmParser)
+diff --git a/llvm/lib/Target/RISCV/RISCV.h b/llvm/lib/Target/RISCV/RISCV.h
+index b25aee46200d..24db59300609 100644
+--- a/llvm/lib/Target/RISCV/RISCV.h
++++ b/llvm/lib/Target/RISCV/RISCV.h
+@@ -40,6 +40,10 @@ void initializeRISCVMergeBaseOffsetOptPass(PassRegistry &);
+ 
+ FunctionPass *createRISCVExpandPseudoPass();
+ void initializeRISCVExpandPseudoPass(PassRegistry &);
++/* PHMon: begin */
++FunctionPass *createRISCVProtPass();
++void initializeRISCVProtPass(PassRegistry &);
++/* PHMon: end */
+ }
+ 
+ #endif
+diff --git a/llvm/lib/Target/RISCV/RISCVInstrFormats.td b/llvm/lib/Target/RISCV/RISCVInstrFormats.td
+index 529e048045c6..18fe2b28d505 100644
+--- a/llvm/lib/Target/RISCV/RISCVInstrFormats.td
++++ b/llvm/lib/Target/RISCV/RISCVInstrFormats.td
+@@ -75,6 +75,9 @@ def OPC_BRANCH    : RISCVOpcode<0b1100011>;
+ def OPC_JALR      : RISCVOpcode<0b1100111>;
+ def OPC_JAL       : RISCVOpcode<0b1101111>;
+ def OPC_SYSTEM    : RISCVOpcode<0b1110011>;
++// PHMon: begin //
++def OPC_CUSTOM1   : RISCVOpcode<0b0101011>;
++// PHMon: end //
+ 
+ class RVInst<dag outs, dag ins, string opcodestr, string argstr,
+              list<dag> pattern, InstFormat format>
+diff --git a/llvm/lib/Target/RISCV/RISCVInstrInfo.td b/llvm/lib/Target/RISCV/RISCVInstrInfo.td
+index 92073f0cd2d1..dd1bbef768f2 100644
+--- a/llvm/lib/Target/RISCV/RISCVInstrInfo.td
++++ b/llvm/lib/Target/RISCV/RISCVInstrInfo.td
+@@ -285,6 +285,13 @@ class ALU_rr<bits<7> funct7, bits<3> funct3, string opcodestr>
+     : RVInstR<funct7, funct3, OPC_OP, (outs GPR:$rd), (ins GPR:$rs1, GPR:$rs2),
+               opcodestr, "$rd, $rs1, $rs2">;
+ 
++// PHMon: begin */
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class Custom_rr<bits<7> funct7, bits<3> funct3, string opcodestr>
++    : RVInstR<funct7, funct3, OPC_CUSTOM1, (outs GPR:$rd), (ins GPR:$rs1, GPR:$rs2),
++              opcodestr, "$rd, $rs1, $rs2">;
++// PHMon: end */
++
+ let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in
+ class CSR_ir<bits<3> funct3, string opcodestr>
+     : RVInstI<funct3, OPC_SYSTEM, (outs GPR:$rd), (ins csr_sysreg:$imm12, GPR:$rs1),
+@@ -376,6 +383,13 @@ def SRA  : ALU_rr<0b0100000, 0b101, "sra">;
+ def OR   : ALU_rr<0b0000000, 0b110, "or">;
+ def AND  : ALU_rr<0b0000000, 0b111, "and">;
+ 
++// PHMon: begin //
++def WRPKRU : Custom_rr<0b0010000, 0b011, "wrpkru">;
++//def WRPKRU : Custom_rr<0b0010000, 0b011, "wrpkru"> {
++//  let rd = 0;
++//}
++// PHMon: end //    
++    
+ let hasSideEffects = 1, mayLoad = 0, mayStore = 0 in {
+ def FENCE : RVInstI<0b000, OPC_MISC_MEM, (outs),
+                     (ins fencearg:$pred, fencearg:$succ),
+diff --git a/llvm/lib/Target/RISCV/RISCVProt.cpp b/llvm/lib/Target/RISCV/RISCVProt.cpp
+new file mode 100644
+index 000000000000..a506b2be1890
+--- /dev/null
++++ b/llvm/lib/Target/RISCV/RISCVProt.cpp
+@@ -0,0 +1,176 @@
++#include "RISCV.h"
++#include "RISCVInstrInfo.h"
++#include "RISCVTargetMachine.h"
++
++#include "llvm/CodeGen/LivePhysRegs.h"
++#include "llvm/CodeGen/MachineFunctionPass.h"
++#include "llvm/CodeGen/MachineInstrBuilder.h"
++#include "llvm/CodeGen/MachineInstr.h"
++#include "llvm/CodeGen/RegisterScavenging.h"
++#include "llvm/CodeGen/TargetFrameLowering.h"
++#include "llvm/CodeGen/TargetInstrInfo.h"
++
++using namespace llvm;
++
++#define RISCV_PROT_NAME "RISCV shadow stack protection insertion pass"
++
++namespace {
++   
++   class RISCVProt : public MachineFunctionPass {
++     public:
++       const RISCVInstrInfo *TII;
++       static char ID;
++     
++       RISCVProt() : MachineFunctionPass(ID) {
++           initializeRISCVProtPass(*PassRegistry::getPassRegistry());
++         }
++     
++       bool runOnMachineFunction(MachineFunction &MF) override;
++     
++       StringRef getPassName() const override { return RISCV_PROT_NAME; }
++     
++     private:
++       unsigned RISCVGetInstProt(MachineBasicBlock:: iterator MBBI);
++     };
++   
++   char RISCVProt::ID = 0;
++   
++   bool RISCVProt::runOnMachineFunction(MachineFunction &MF) {
++     TII = static_cast<const RISCVInstrInfo *>(MF.getSubtarget().getInstrInfo());
++     if (strcmp(MF.getName().str().c_str(), "insertPC") == 0) {
++       outs() << MF.getName()<< '\n';
++       int cnt = 0;
++       unsigned Reg2 = 0; // rs2: perm
++       for (auto &MBB : MF ) {
++          for (auto &MI : MBB) {
++           if ((cnt++ == 2) || MI.getDesc().isReturn()) {
++             DebugLoc dl;
++             unsigned Reg1 = 1; // rs1: pkey
++             if (MI.getDesc().isReturn()) {
++               Reg2 = 3 << 2;
++             }
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(4064); // sp = sp - 32
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(7).addReg(3).addImm(16); // sd t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 6).addImm(Reg1); // rs1
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 7).addImm(Reg2); // rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 6).addReg(6).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 7).addReg(7).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::WRPKRU), 0).addReg(6).addReg(7); //rs1, rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(7).addReg(3).addImm(16); // ld t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(32); // sp = sp + 32
++           }
++          }
++        }
++     }
++
++     if (strcmp(MF.getName().str().c_str(), "checkPC") == 0)  {
++       outs() << MF.getName()<< '\n';
++       int cnt = 0;
++       for (auto &MBB : MF ) {
++          for (auto &MI : MBB) {
++           if ((cnt++ == 2) || MI.getDesc().isReturn()) {
++             DebugLoc dl;
++             unsigned Reg1 = 1; // rs1: pkey
++             //unsigned Reg2 = 3; // rs2: perm
++             unsigned Reg2 = 3 << 2; // rs2: perm
++             if (cnt == 3) {
++               Reg2 = 1 << 2;
++             }
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(4064); // sp = sp - 32
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(7).addReg(3).addImm(16); // sd t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 6).addImm(Reg1); // rs1
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 7).addImm(Reg2); // rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 6).addReg(6).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 7).addReg(7).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::WRPKRU), 1).addReg(6).addReg(7); //rs1, rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(7).addReg(3).addImm(16); // ld t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(32); // sp = sp + 32
++            }
++          }
++        }
++     }
++
++     if (strcmp(MF.getName().str().c_str(), "createSS") == 0) {
++       outs() << MF.getName()<< '\n';
++       int cnt = 0;
++       for (auto &MBB : MF ) {
++          for (auto &MI : MBB) {
++           if ((cnt++ == 2) || MI.getDesc().isReturn()) {
++             DebugLoc dl;
++             unsigned Reg1 = 1; // rs1: pkey
++             unsigned Reg2 = 3 << 2; // rs2: perm
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(4064); // sp = sp - 32
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(7).addReg(3).addImm(16); // sd t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 6).addImm(Reg1); // rs1
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 7).addImm(Reg2); // rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 6).addReg(6).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 7).addReg(7).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::WRPKRU), 1).addReg(6).addReg(7); //rs1, rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(7).addReg(3).addImm(16); // ld t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(32); // sp = sp + 32
++            }
++         }
++        }
++     }
++
++     /*if (strcmp(MF.getName().str().c_str(), "main") == 0)  {
++       outs() << MF.getName()<< '\n';
++       int cnt = 0;
++       unsigned Reg2 = 0; // rs2: perm
++       for (auto &MBB : MF ) {
++          for (auto &MI : MBB) {
++           if ((cnt++ == 2) || MI.getDesc().isReturn()) {
++             DebugLoc dl;
++             unsigned Reg1 = 1; // rs1: pkey
++             if (MI.getDesc().isReturn()) {
++               Reg2 = 2 << 2;
++             }
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(4064); // sp = sp - 32
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SD)).addReg(7).addReg(3).addImm(16); // sd t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 6).addImm(Reg1); // rs1
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LUI), 7).addImm(Reg2); // rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 6).addReg(6).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::SRLI), 7).addReg(7).addImm(12);
++             BuildMI(MBB, MI, dl, TII->get(RISCV::WRPKRU), 0).addReg(6).addReg(7); //rs1, rs2
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(7).addReg(3).addImm(16); // ld t1, 16(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::LD)).addReg(6).addReg(3).addImm(24); // sd t0, 24(sp)
++             BuildMI(MBB, MI, dl, TII->get(RISCV::ADDI), 3).addReg(3).addImm(32); // sp = sp + 32
++           }
++          }
++        }
++
++        }*/
++
++     if (strcmp(MF.getName().str().c_str(), "insertPC") == 0 || strcmp(MF.getName().str().c_str(), "checkPC") == 0 || strcmp(MF.getName().str().c_str(), "createSS") == 0)  {
++     //if (strcmp(MF.getName().str().c_str(), "insertPC") == 0 || strcmp(MF.getName().str().c_str(), "checkPC") == 0)  {
++       for (auto &MBB : MF ) {
++         outs() <<  MBB << "\n";
++         outs() << "****************" << "\n";
++       }
++     }
++     /*if (strcmp(MF.getName().str().c_str(), "main") == 0) {
++       for (auto &MBB : MF ) {
++         outs() <<  MBB << "\n";
++         outs() << "****************" << "\n";
++       }
++       }*/
++     return false;
++  }
++   
++   
++} // end of anonymous namespace
++
++INITIALIZE_PASS(RISCVProt, "riscv-prot",
++                RISCV_PROT_NAME, false, false)
++namespace llvm {
++  
++   FunctionPass *createRISCVProtPass() { return new RISCVProt(); }
++   
++} // end of namespace llvm
+diff --git a/llvm/lib/Target/RISCV/RISCVTargetMachine.cpp b/llvm/lib/Target/RISCV/RISCVTargetMachine.cpp
+index 5fc7e58a0c5a..6d2fcc8fe24b 100644
+--- a/llvm/lib/Target/RISCV/RISCVTargetMachine.cpp
++++ b/llvm/lib/Target/RISCV/RISCVTargetMachine.cpp
+@@ -36,6 +36,9 @@ extern "C" void LLVMInitializeRISCVTarget() {
+   RegisterTargetMachine<RISCVTargetMachine> Y(getTheRISCV64Target());
+   auto PR = PassRegistry::getPassRegistry();
+   initializeRISCVExpandPseudoPass(*PR);
++  /* PHMon: begin */
++  initializeRISCVProtPass(*PR);
++  /* PHMon: end */
+ }
+ 
+ static std::string computeDataLayout(const Triple &TT) {
+@@ -132,4 +135,7 @@ void RISCVPassConfig::addPreEmitPass2() {
+ 
+ void RISCVPassConfig::addPreRegAlloc() {
+   addPass(createRISCVMergeBaseOffsetOptPass());
++  /* PHMon: begin */
++  addPass(createRISCVProtPass());
++  /* PHMon: end */
+ }
